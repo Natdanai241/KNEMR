@@ -6,8 +6,8 @@
    supa helper for tenant-scoped requests).
    ============================================================ */
 (function () {
-  const SUPABASE_URL = "https://lozyfwydyrovxjtsgybn.supabase.co";
-  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imxvenlmd3lkeXJvdnhqdHNneWJuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMyMzAyNDcsImV4cCI6MjA5ODgwNjI0N30.i2QfDgm9NkNb0E7JIUh_4hnVYpLVt6pwslTuzUb4UA8";
+  const SUPABASE_URL = "https://gakbukcualmosxjbyfpw.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdha2J1a2N1YWxtb3N4amJ5ZnB3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4MDA5ODMsImV4cCI6MjA5ODM3Njk4M30.iYy1YN6N1gP3kvw2Ex2d9yKHUS_k4eKhxL2j-VYX93U";
 
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   window.__sb = sb;
@@ -52,14 +52,14 @@
   }
 
   // ---------------- Auth (login / clinic onboarding / join clinic) ----------------
-  function AuthScreen({ onAuthed }) {
-    const [mode, setMode] = React.useState("login");
-    const [email, setEmail] = React.useState("");
+  function AuthScreen({ onAuthed, resumeSession }) {
+    const [mode, setMode] = React.useState(resumeSession ? "onboard" : "login");
+    const [email, setEmail] = React.useState(resumeSession ? resumeSession.user.email : "");
     const [password, setPassword] = React.useState("");
     const [fullName, setFullName] = React.useState("");
     const [clinicName, setClinicName] = React.useState("");
     const [joinCode, setJoinCode] = React.useState("");
-    const [notice, setNotice] = React.useState("");
+    const [notice, setNotice] = React.useState(resumeSession ? "ยืนยันอีเมลแล้ว กรุณากรอกข้อมูลด้านล่างเพื่อเริ่มใช้งาน" : "");
     const [err, setErr] = React.useState("");
     const [busy, setBusy] = React.useState(false);
 
@@ -69,19 +69,39 @@
         const { error } = await sb.auth.signInWithPassword({ email, password });
         if (error) throw error;
         onAuthed();
-      } catch (e) { setErr(e.message || String(e)); }
-      finally { setBusy(false); }
+      } catch (e) {
+        setErr(e.message || String(e));
+      } finally {
+        setBusy(false);
+      }
     }
 
     async function doOnboard() {
       setBusy(true); setErr("");
       try {
-        const { data: su, error: e1 } = await sb.auth.signUp({
-          email, password, options: { data: { full_name: fullName, intent: "onboard", clinic_name: clinicName } }
-        });
-        if (e1) throw e1;
-        if (su.session) { onAuthed(); }
-        else { setNotice("สมัครสำเร็จ กรุณายืนยันอีเมล แล้วกลับมาเข้าสู่ระบบอีกครั้ง"); setMode("login"); }
+        let uid;
+        if (resumeSession) {
+          uid = resumeSession.user.id;
+        } else {
+          const { data: su, error: e1 } = await sb.auth.signUp({ email, password });
+          if (e1) throw e1;
+          uid = su.user && su.user.id;
+          if (!su.session) { setNotice("สมัครสำเร็จ กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ"); setMode("login"); return; }
+        }
+
+        const slug = clinicName.toLowerCase().trim().replace(/[^a-z0-9ก-๙-]+/g, "-").replace(/(^-|-$)/g, "") || ("clinic-" + Date.now());
+        const { data: clinic, error: e2 } = await sb.from("clinics").insert({ name: clinicName, slug, status: "active" }).select().single();
+        if (e2) throw e2;
+
+        const { error: e3 } = await sb.from("profiles").insert({ id: uid, clinic_id: clinic.id, full_name: fullName, role: "doctor", status: "approved" });
+        if (e3) throw e3;
+
+        const { data: trialPlan } = await sb.from("plans").select("id").eq("code", "trial").single();
+        const trialEnds = new Date(Date.now() + 14 * 86400000).toISOString();
+        const { error: e4 } = await sb.from("clinic_subscriptions").insert({ clinic_id: clinic.id, plan_id: trialPlan.id, status: "trialing", trial_ends_at: trialEnds, current_period_end: trialEnds });
+        if (e4) throw e4;
+
+        onAuthed();
       } catch (e) { setErr(e.message || String(e)); }
       finally { setBusy(false); }
     }
@@ -89,17 +109,25 @@
     async function doJoin() {
       setBusy(true); setErr("");
       try {
-        const slug = joinCode.trim().toLowerCase();
-        const { data: clinic, error: ce } = await sb.from("clinics").select("id").eq("slug", slug).maybeSingle();
+        const { data: clinic, error: ce } = await sb.from("clinics").select("id").eq("slug", joinCode.trim().toLowerCase()).maybeSingle();
         if (ce) throw ce;
         if (!clinic) throw new Error("ไม่พบรหัสคลินิกนี้");
 
-        const { data: su, error: e1 } = await sb.auth.signUp({
-          email, password, options: { data: { full_name: fullName, intent: "join", clinic_slug: slug } }
-        });
-        if (e1) throw e1;
-        if (su.session) { onAuthed(); }
-        else { setNotice("ลงทะเบียนสำเร็จ กรุณายืนยันอีเมล แล้วเข้าสู่ระบบเพื่อรอการอนุมัติ"); setMode("login"); }
+        let uid;
+        if (resumeSession) {
+          uid = resumeSession.user.id;
+        } else {
+          const { data: su, error: e1 } = await sb.auth.signUp({ email, password });
+          if (e1) throw e1;
+          uid = su.user && su.user.id;
+          if (!su.session) { setNotice("สมัครสำเร็จ กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ"); setMode("login"); return; }
+        }
+
+        const { error: e2 } = await sb.from("profiles").insert({ id: uid, clinic_id: clinic.id, full_name: fullName, role: "staff", status: "pending" });
+        if (e2) throw e2;
+
+        setNotice("ลงทะเบียนสำเร็จ กรุณารอแพทย์อนุมัติบัญชีของท่าน");
+        setMode("login");
       } catch (e) { setErr(e.message || String(e)); }
       finally { setBusy(false); }
     }
@@ -249,127 +277,52 @@
     );
   }
 
-  function BootstrapForm({ onDone }) {
-    const [fullName, setFullName] = React.useState("");
-    const [email, setEmail] = React.useState("");
-    const [password, setPassword] = React.useState("");
-    const [notice, setNotice] = React.useState("");
-    const [err, setErr] = React.useState("");
-    const [busy, setBusy] = React.useState(false);
-
-    async function doBootstrap() {
-      setBusy(true); setErr("");
-      try {
-        const { data: su, error: e1 } = await sb.auth.signUp({
-          email, password, options: { data: { full_name: fullName, intent: "bootstrap" } }
-        });
-        if (e1) throw e1;
-        if (su.session) { onDone(); }
-        else { setNotice("สมัครสำเร็จ กรุณายืนยันอีเมล แล้วกลับมาเข้าสู่ระบบอีกครั้ง"); }
-      } catch (e) { setErr(e.message || String(e)); }
-      finally { setBusy(false); }
-    }
-
-    return h("div", { style: shellWrap },
-      h("div", { style: cardStyle },
-        h("div", { style: { fontSize: 40, textAlign: "center", marginBottom: 4 } }, "🛠"),
-        h("div", { style: { fontWeight: 700, fontSize: 17, textAlign: "center", marginBottom: 6, color: "#1a5276" } }, "ตั้งค่าระบบครั้งแรก"),
-        h("div", { style: { fontSize: 13, textAlign: "center", color: "#666", marginBottom: 16 } }, "ยังไม่มีผู้ดูแลระบบ — บัญชีนี้จะเป็น Super Admin"),
-        notice && h("div", { style: { background: "#eafaf1", color: "#1e8449", padding: "10px 12px", borderRadius: 8, fontSize: 13, marginBottom: 12 } }, notice),
-        h(ErrBox, { msg: err }),
-        h("input", { style: inputStyle, placeholder: "ชื่อ-นามสกุล", value: fullName, onChange: e => setFullName(e.target.value) }),
-        h("input", { style: inputStyle, type: "email", placeholder: "อีเมล", value: email, onChange: e => setEmail(e.target.value) }),
-        h("input", { style: inputStyle, type: "password", placeholder: "รหัสผ่าน", value: password, onChange: e => setPassword(e.target.value) }),
-        h("button", { style: { ...btnStyle, opacity: busy ? 0.6 : 1 }, disabled: busy, onClick: doBootstrap }, busy ? "กำลังดำเนินการ..." : "สร้างบัญชี Super Admin")
-      )
-    );
-  }
-
   // ---------------- Root router ----------------
   function RootRouter() {
     const [state, setState] = React.useState({ phase: "loading" });
 
-    async function enterAuth() {
-      let noAdminYet = false;
-      try {
-        const { data } = await sb.rpc("super_admin_exists");
-        noAdminYet = data === false;
-      } catch (_) {}
-      setState({ phase: noAdminYet ? "bootstrap" : "auth" });
-    }
-
     async function loadAll(session) {
-      let { data: profile } = await sb.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
-
-      if (!profile) {
-        const meta = session.user.user_metadata || {};
-        try {
-          if (meta.intent === "bootstrap") {
-            const { data: noAdmin } = await sb.rpc("super_admin_exists");
-            if (noAdmin === false) {
-              const { data: created } = await sb.from("profiles")
-                .insert({ id: session.user.id, clinic_id: null, full_name: meta.full_name, role: "super_admin", status: "approved" })
-                .select().maybeSingle();
-              profile = created;
-            }
-          } else if (meta.intent === "onboard" && meta.clinic_name) {
-            const slug = meta.clinic_name.toLowerCase().trim().replace(/[^a-z0-9ก-๙-]+/g, "-").replace(/(^-|-$)/g, "") || ("clinic-" + Date.now());
-            const { data: clinic } = await sb.from("clinics").insert({ name: meta.clinic_name, slug, status: "active" }).select().single();
-            if (clinic) {
-              const { data: created } = await sb.from("profiles")
-                .insert({ id: session.user.id, clinic_id: clinic.id, full_name: meta.full_name, role: "doctor", status: "approved" })
-                .select().maybeSingle();
-              profile = created;
-              const { data: trialPlan } = await sb.from("plans").select("id").eq("code", "trial").single();
-              const trialEnds = new Date(Date.now() + 14 * 86400000).toISOString();
-              await sb.from("clinic_subscriptions").insert({ clinic_id: clinic.id, plan_id: trialPlan.id, status: "trialing", trial_ends_at: trialEnds, current_period_end: trialEnds });
-            }
-          } else if (meta.intent === "join" && meta.clinic_slug) {
-            const { data: clinic } = await sb.from("clinics").select("id").eq("slug", meta.clinic_slug).maybeSingle();
-            if (clinic) {
-              const { data: created } = await sb.from("profiles")
-                .insert({ id: session.user.id, clinic_id: clinic.id, full_name: meta.full_name, role: "staff", status: "pending" })
-                .select().maybeSingle();
-              profile = created;
-            }
-          }
-        } catch (_) {}
-      }
-
-      if (!profile) { enterAuth(); return; }
-
-      window.__TENANT__.clinicId = profile.clinic_id;
-      window.__TENANT__.accessToken = session.access_token;
-
-      if (profile.role === "super_admin") { setState({ phase: "super-admin" }); return; }
-      if (profile.status === "pending") { setState({ phase: "pending" }); return; }
-      if (profile.status === "suspended") { setState({ phase: "user-suspended" }); return; }
-
-      const { data: clinic } = await sb.from("clinics").select("*").eq("id", profile.clinic_id).maybeSingle();
-      if (clinic && clinic.status === "suspended") { setState({ phase: "clinic-suspended" }); return; }
-
-      if (!profile.pdpa_consented_at) { setState({ phase: "pdpa", profile }); return; }
-
-      const { data: subscription } = await sb.from("clinic_subscriptions").select("*").eq("clinic_id", profile.clinic_id).maybeSingle();
-      if (subscription && ["expired", "cancelled"].includes(subscription.status)) { setState({ phase: "billing", subscription }); return; }
-
-      // Bridge into the existing localStorage-based session the dashboard already expects —
-      // this lets clinic-dashboard.jsx/AppRoot mount completely unchanged.
       try {
-        localStorage.setItem("clinic_session_v1", JSON.stringify({
-          id: profile.id, name: profile.full_name || session.user.email, username: session.user.email,
-          role: profile.role === "doctor" ? "doctor" : profile.role === "nurse" ? "nurse" : "staff",
-          status: "active",
-        }));
-      } catch (_) {}
+        const { data: profile, error: pErr } = await sb.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+        if (pErr) throw pErr;
+        if (!profile) { setState({ phase: "auth", resumeSession: session }); return; }
 
-      setState({ phase: "app" });
+        window.__TENANT__.clinicId = profile.clinic_id;
+        window.__TENANT__.accessToken = session.access_token;
+
+        if (profile.role === "super_admin") { setState({ phase: "super-admin" }); return; }
+        if (profile.status === "pending") { setState({ phase: "pending" }); return; }
+        if (profile.status === "suspended") { setState({ phase: "user-suspended" }); return; }
+
+        const { data: clinic } = await sb.from("clinics").select("*").eq("id", profile.clinic_id).maybeSingle();
+        if (clinic && clinic.status === "suspended") { setState({ phase: "clinic-suspended" }); return; }
+
+        if (!profile.pdpa_consented_at) { setState({ phase: "pdpa", profile }); return; }
+
+        const { data: subscription } = await sb.from("clinic_subscriptions").select("*").eq("clinic_id", profile.clinic_id).maybeSingle();
+        if (subscription && ["expired", "cancelled"].includes(subscription.status)) { setState({ phase: "billing", subscription }); return; }
+
+        // Bridge into the existing localStorage-based session the dashboard already expects —
+        // this lets clinic-dashboard.jsx/AppRoot mount completely unchanged.
+        try {
+          localStorage.setItem("clinic_session_v1", JSON.stringify({
+            id: profile.id, name: profile.full_name || session.user.email, username: session.user.email,
+            role: profile.role === "doctor" ? "doctor" : profile.role === "nurse" ? "nurse" : "staff",
+            status: "active",
+          }));
+        } catch (_) {}
+
+        setState({ phase: "app" });
+      } catch (e) {
+        console.error("[saas-shell] loadAll failed:", e);
+        setState({ phase: "load-error", message: e.message || String(e) });
+      }
     }
 
     React.useEffect(() => {
-      sb.auth.getSession().then(({ data }) => { if (data.session) loadAll(data.session); else enterAuth(); });
+      sb.auth.getSession().then(({ data }) => { if (data.session) loadAll(data.session); else setState({ phase: "auth" }); });
       const { data: sub } = sb.auth.onAuthStateChange((_e, session) => {
-        if (session) loadAll(session); else { try { localStorage.removeItem("clinic_session_v1"); } catch (_) {} enterAuth(); }
+        if (session) loadAll(session); else { try { localStorage.removeItem("clinic_session_v1"); } catch (_) {} setState({ phase: "auth" }); }
       });
       return () => sub.subscription.unsubscribe();
     }, []);
@@ -384,12 +337,12 @@
 
     switch (state.phase) {
       case "loading": return h(BootScreen, {});
-      case "bootstrap": return h(BootstrapForm, { onDone: () => sb.auth.getSession().then(({ data }) => loadAll(data.session)) });
-      case "auth": return h(AuthScreen, { onAuthed: () => sb.auth.getSession().then(({ data }) => loadAll(data.session)) });
+      case "auth": return h(AuthScreen, { onAuthed: () => sb.auth.getSession().then(({ data }) => loadAll(data.session)), resumeSession: state.resumeSession || null });
       case "pending": return h(GateScreen, { title: "รอการอนุมัติ", body: "บัญชีของท่านลงทะเบียนสำเร็จแล้ว กรุณารอแพทย์ประจำคลินิกอนุมัติก่อนเข้าใช้งาน", showSignOut: true });
       case "user-suspended": return h(GateScreen, { title: "บัญชีถูกระงับ", body: "บัญชีของท่านถูกระงับการใช้งาน กรุณาติดต่อแพทย์ประจำคลินิก", showSignOut: true });
       case "clinic-suspended": return h(GateScreen, { title: "คลินิกถูกระงับ", body: "คลินิกนี้ถูกระงับการใช้งานชั่วคราว กรุณาติดต่อผู้ดูแลระบบ", showSignOut: true });
       case "billing": return h(GateScreen, { title: "การสมัครสมาชิกหมดอายุ", body: "แผนการใช้งานของคลินิกหมดอายุหรือถูกยกเลิก กรุณาติดต่อผู้ดูแลระบบเพื่อต่ออายุ", showSignOut: true });
+      case "load-error": return h(GateScreen, { title: "โหลดข้อมูลผู้ใช้ไม่สำเร็จ", body: (state.message || "เกิดข้อผิดพลาดไม่ทราบสาเหตุ") + " — กรุณาลองออกจากระบบแล้วเข้าสู่ระบบใหม่ หรือติดต่อผู้ดูแลระบบหากยังพบปัญหา", showSignOut: true });
       case "pdpa": return h(PDPAModal, { onAccept: acceptPDPA });
       case "super-admin": return h(SuperAdminPortal, {});
       case "app": return h(window.AppRoot);
