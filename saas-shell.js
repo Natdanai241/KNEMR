@@ -178,6 +178,31 @@
     function GateScreen({ title, body, showSignOut }) {
         return h("div", { style: shellWrap }, h("div", { style: cardStyle }, h("div", { style: { fontWeight: 700, fontSize: 17, marginBottom: 10, color: COLORS.danger } }, title), h("p", { style: { fontSize: 14, lineHeight: 1.7, color: "#333", marginBottom: 16 } }, body), showSignOut && h("button", { style: btnStyle, onClick: () => sb.auth.signOut().then(() => window.location.reload()) }, "ออกจากระบบ")));
     }
+    // ---------------- Email link confirmation ----------------
+    // Handles ?token_hash=&type= links (see custom email templates). Requires an explicit
+    // tap before calling verifyOtp, and never lets Supabase's own /auth/v1/verify GET
+    // endpoint see the token at all — both defend against Outlook/Mimecast "Safe Links"
+    // style scanners that pre-fetch email links and silently burn the one-time token.
+    function ConfirmScreen({ tokenHash, type, onDone }) {
+        const [busy, setBusy] = React.useState(false);
+        const [err, setErr] = React.useState("");
+        async function confirm() {
+            setBusy(true);
+            setErr("");
+            try {
+                const { data, error } = await withTimeout(sb.auth.verifyOtp({ token_hash: tokenHash, type }), 10000, "ยืนยันอีเมล");
+                if (error)
+                    throw error;
+                window.history.replaceState({}, document.title, window.location.pathname);
+                onDone(data.session);
+            }
+            catch (e) {
+                setErr((e.message || String(e)) + " — ลิงก์นี้อาจถูกใช้ไปแล้ว (เช่น ถูกระบบสแกนอีเมลเปิดล่วงหน้า) หรือหมดอายุ กรุณาขอลิงก์ใหม่แล้วกดยืนยันทันที หรือให้ผู้ดูแลระบบยืนยันบัญชีให้จาก Supabase Dashboard โดยตรง");
+                setBusy(false);
+            }
+        }
+        return h("div", { style: shellWrap }, h("div", { style: cardStyle }, h("div", { style: { fontSize: 40, textAlign: "center", marginBottom: 4 } }, "📧"), h("div", { style: { fontWeight: 700, fontSize: 17, textAlign: "center", marginBottom: 12, color: "#1a5276" } }, "ยืนยันอีเมลของคุณ"), h("p", { style: { fontSize: 13.5, color: "#555", textAlign: "center", marginBottom: 16 } }, "กดปุ่มด้านล่างเพื่อยืนยันตัวตนและเข้าสู่ระบบ (ต้องกดด้วยตนเองเพื่อป้องกันลิงก์ถูกใช้โดยระบบสแกนอีเมลอัตโนมัติ)"), h(ErrBox, { msg: err }), h("button", { style: { ...btnStyle, opacity: busy ? 0.6 : 1 }, disabled: busy, onClick: confirm }, busy ? "กำลังยืนยัน..." : "ยืนยันและเข้าสู่ระบบ")));
+    }
     // ---------------- Super Admin portal ----------------
     function SuperAdminPortal() {
         const [tab, setTab] = React.useState("clinics");
@@ -232,6 +257,15 @@
     // ---------------- Root router ----------------
     function RootRouter() {
         const [state, setState] = React.useState({ phase: "loading" });
+        // Captured once on first mount: if the URL carries ?token_hash=&type= (our custom
+        // email-template link), show a manual confirm step instead of letting getSession()
+        // race ahead and briefly bounce to the login screen.
+        const [pendingConfirm] = React.useState(() => {
+            const p = new URLSearchParams(window.location.search);
+            const token_hash = p.get("token_hash");
+            const type = p.get("type");
+            return token_hash && type ? { token_hash, type } : null;
+        });
         async function loadAll(session) {
             try {
                 const { data: profile, error: pErr } = await withTimeout(sb.from("profiles").select("*").eq("id", session.user.id).maybeSingle(), 10000, "โหลดโปรไฟล์");
@@ -287,19 +321,21 @@
             }
         }
         React.useEffect(() => {
-            withTimeout(sb.auth.getSession(), 10000, "โหลดเซสชัน")
-                .then(({ data }) => { if (data.session)
+            if (pendingConfirm) {
+                setState({ phase: "confirm" });
+            }
+            else {
+                withTimeout(sb.auth.getSession(), 10000, "โหลดเซสชัน")
+                    .then(({ data }) => { if (data.session)
                     loadAll(data.session);
                 else
                     setState({ phase: "auth" }); })
-                .catch(e => {
-                    console.error("[saas-shell] getSession failed:", e);
-                    setState({ phase: "load-error", message: e.message || String(e) });
-                });
+                    .catch(e => { console.error("[saas-shell] getSession failed:", e); setState({ phase: "load-error", message: e.message || String(e) }); });
+            }
             const { data: sub } = sb.auth.onAuthStateChange((_e, session) => {
                 if (session)
                     loadAll(session);
-                else {
+                else if (!pendingConfirm) {
                     try {
                         localStorage.removeItem("clinic_session_v1");
                     }
@@ -318,6 +354,7 @@
         }
         switch (state.phase) {
             case "loading": return h(BootScreen, {});
+            case "confirm": return h(ConfirmScreen, { tokenHash: pendingConfirm.token_hash, type: pendingConfirm.type, onDone: (session) => (session ? loadAll(session) : setState({ phase: "auth" })) });
             case "auth": return h(AuthScreen, { onAuthed: () => sb.auth.getSession().then(({ data }) => loadAll(data.session)), resumeSession: state.resumeSession || null });
             case "pending": return h(GateScreen, { title: "รอการอนุมัติ", body: "บัญชีของท่านลงทะเบียนสำเร็จแล้ว กรุณารอแพทย์ประจำคลินิกอนุมัติก่อนเข้าใช้งาน", showSignOut: true });
             case "user-suspended": return h(GateScreen, { title: "บัญชีถูกระงับ", body: "บัญชีของท่านถูกระงับการใช้งาน กรุณาติดต่อแพทย์ประจำคลินิก", showSignOut: true });
