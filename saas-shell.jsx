@@ -320,7 +320,9 @@
     }
 
     React.useEffect(() => {
-      sb.auth.getSession().then(({ data }) => { if (data.session) loadAll(data.session); else setState({ phase: "auth" }); });
+      sb.auth.getSession()
+        .then(({ data }) => { if (data.session) loadAll(data.session); else setState({ phase: "auth" }); })
+        .catch(e => { console.error("[saas-shell] getSession failed:", e); setState({ phase: "load-error", message: e.message || String(e) }); });
       const { data: sub } = sb.auth.onAuthStateChange((_e, session) => {
         if (session) loadAll(session); else { try { localStorage.removeItem("clinic_session_v1"); } catch (_) {} setState({ phase: "auth" }); }
       });
